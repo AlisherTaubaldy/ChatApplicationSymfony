@@ -2,14 +2,19 @@
 
 namespace App\Security;
 
+use App\Entity\User;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Exception\AuthenticationException;
 use Symfony\Component\Security\Core\Exception\CustomUserMessageAuthenticationException;
 use Symfony\Component\Security\Http\Authenticator\AbstractAuthenticator;
 use Symfony\Component\Security\Http\Authenticator\Passport\Badge\UserBadge;
+use Symfony\Component\Security\Http\Authenticator\Passport\Credentials\PasswordCredentials;
 use Symfony\Component\Security\Http\Authenticator\Passport\Passport;
 use Symfony\Component\Security\Http\Authenticator\Passport\SelfValidatingPassport;
 
@@ -18,59 +23,62 @@ use Symfony\Component\Security\Http\Authenticator\Passport\SelfValidatingPasspor
  */
 class UserAuthenticator extends AbstractAuthenticator
 {
-    /**
-     * Called on every request to decide if this authenticator should be
-     * used for the request. Returning `false` will cause this authenticator
-     * to be skipped.
-     */
+    private EntityManagerInterface $entityManager;
+    private UrlGeneratorInterface $urlGenerator;
+
+    public function __construct(UrlGeneratorInterface $urlGenerator, EntityManagerInterface $entityManager)
+    {
+        $this->urlGenerator = $urlGenerator;
+        $this->entityManager = $entityManager;
+    }
+
     public function supports(Request $request): ?bool
     {
-        // return $request->headers->has('X-AUTH-TOKEN');
+        return $request->getPathInfo() === '/user/login' && $request->isMethod('POST');
     }
 
     public function authenticate(Request $request): Passport
     {
-        // $apiToken = $request->headers->get('X-AUTH-TOKEN');
-        // if (null === $apiToken) {
-        // The token header was empty, authentication fails with HTTP Status
-        // Code 401 "Unauthorized"
-        // throw new CustomUserMessageAuthenticationException('No API token provided');
-        // }
+        $email = $request->request->get('_email');
+        $password = $request->request->get('_password');
 
-        // implement your own logic to get the user identifier from `$apiToken`
-        // e.g. by looking up a user in the database using its API key
-        // $userIdentifier = /** ... */;
+        $user = $this->getUserByEmail($email);
 
-        // return new SelfValidatingPassport(new UserBadge($userIdentifier));
+        if (!$user) {
+            throw new CustomUserMessageAuthenticationException('User not found.');
+        }
+
+        return new Passport(
+            new UserBadge($email, function ($userIdentifier) {
+                return $this->getUserByEmail($userIdentifier);
+            }),
+            new PasswordCredentials($password)
+        );
     }
 
     public function onAuthenticationSuccess(Request $request, TokenInterface $token, string $firewallName): ?Response
     {
-        // on success, let the request continue
-        return null;
+        $email = $request->request->get('_email');
+
+        $user = $this->getUserByEmail($email);
+
+        if ($user) {
+            $this->entityManager->persist($user);
+            $this->entityManager->flush();
+        }
+
+        return new RedirectResponse($this->urlGenerator->generate('template_index'));
     }
 
     public function onAuthenticationFailure(Request $request, AuthenticationException $exception): ?Response
     {
-        $data = [
-            // you may want to customize or obfuscate the message first
-            'message' => strtr($exception->getMessageKey(), $exception->getMessageData()),
+        $request->getSession()->getFlashBag()->add('error', $exception->getMessage());
 
-            // or to translate this message
-            // $this->translator->trans($exception->getMessageKey(), $exception->getMessageData())
-        ];
-
-        return new JsonResponse($data, Response::HTTP_UNAUTHORIZED);
+        return new RedirectResponse($this->urlGenerator->generate('app_login'));
     }
 
-    // public function start(Request $request, ?AuthenticationException $authException = null): Response
-    // {
-    //     /*
-    //      * If you would like this class to control what happens when an anonymous user accesses a
-    //      * protected page (e.g. redirect to /login), uncomment this method and make this class
-    //      * implement Symfony\Component\Security\Http\EntryPoint\AuthenticationEntryPointInterface.
-    //      *
-    //      * For more details, see https://symfony.com/doc/current/security/experimental_authenticators.html#configuring-the-authentication-entry-point
-    //      */
-    // }
+    private function getUserByEmail(string $email): ?User
+    {
+        return $this->entityManager->getRepository(User::class)->findOneBy(['email' => $email]);
+    }
 }
